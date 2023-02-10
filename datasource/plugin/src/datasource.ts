@@ -270,7 +270,7 @@ export class NgsildDataSource extends DataSourceApi<NgsildQuery, NgsildSourceOpt
   }
 
   async testDatasource() {
-    return this.request({queryType: NgsildQueryType.VERSION});
+    return this.request({queryType: NgsildQueryType.TYPES});
   }
 
   // TODO would like to use lastValueFrom here, but import is unclear
