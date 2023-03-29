@@ -11,9 +11,9 @@ import {
 
 import { getBackendSrv, BackendSrv, FetchResponse, BackendSrvRequest } from "@grafana/runtime";
 
-import { NgsildQuery, NgsildSourceOptions, defaultQuery, NgsildQueryType } from './types';
+import { NgsildQuery, NgsildSourceOptions, defaultQuery, NgsildQueryType, NamePattern, namePatternFromValue } from './types';
 import { JsUtils } from 'utils';
-import { Measurement, EntityTemporal, INVALID_ATTRIBUTES, Entity } from 'ngsildTypes';
+import { Measurement, EntityTemporal, INVALID_ATTRIBUTES, Entity, getValue } from 'ngsildTypes';
 import { isNumber } from 'lodash';
 import { GeoHandler } from 'GeoHandler';
 import { NodeGraphHandler } from 'NodeGraphHandler';
@@ -25,6 +25,7 @@ export class NgsildDataSource extends DataSourceApi<NgsildQuery, NgsildSourceOpt
   private readonly timeseriesUrl: string;  // http://broker-ts:8080
   private readonly contextUrl: string; // http://context/ngsi-context.jsonld
   private readonly contextLinkHeader: string; // <http://context/ngsi-context.jsonld>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json
+  private readonly flavour: "generic"|"orion";
 
   constructor(instanceSettings: DataSourceInstanceSettings<NgsildSourceOptions>) {
     super(instanceSettings);
@@ -32,6 +33,7 @@ export class NgsildDataSource extends DataSourceApi<NgsildQuery, NgsildSourceOpt
     if (baseUrl.indexOf("/ngsi-ld/v1") < 0)
       {baseUrl = JsUtils.concatPaths(baseUrl, "/ngsi-ld/v1");}
     this.baseUrl = baseUrl;
+    this.flavour = instanceSettings.jsonData?.flavour?.toLowerCase() as any || "generic";
     const actualTimeseriesUrl: string = instanceSettings.jsonData?.timeseriesUrl || "";
     // note: the route alias "temporal" for instanceSettings.jsonData.timeseriesUrl in the backend proxy 
     // is defined in plugin.json, see https://community.grafana.com/t/grafana-datasource-backend-proxy/6861/4
@@ -64,19 +66,28 @@ export class NgsildDataSource extends DataSourceApi<NgsildQuery, NgsildSourceOpt
     if (!Array.isArray(results))
       {results = [results] as any;}
     if (query.queryType === NgsildQueryType.GEO)
-      {return [GeoHandler.handleGeoResult(results as Entity[], query.refId)];}
+      {return [GeoHandler.handleGeoResult(results as Entity[], query)];}
     if (query.queryType === NgsildQueryType.NODE_GRAPH)
       {return new NodeGraphHandler(this, query).handleGraphResult(results as Entity[], 4);} // TODO max depth
     const frames: MutableDataFrame[] = [];
     for (const result of results as any) {
-      let name: string = result.id;
-      if (!query.useLongEntityName) {
+      const namePattern: NamePattern = namePatternFromValue(query.namePattern);
+      const nameField: string = 
+          (namePattern !== NamePattern.ATTRIBUTE && query.entityName !== "id" && query.entityName !== "id_short" && !!query.entityName && query.entityName in result) ? query.entityName : "id";
+      let name: string = namePattern === NamePattern.ATTRIBUTE ? "" : (getValue(result[nameField] as any)?.toString() || result.id);
+      const useShortEntityId: boolean = query.entityName === "id_short" || (query.entityName === undefined && !query.useLongEntityName);
+      if (useShortEntityId) {
         const col: number = name.lastIndexOf(":");
         if (col >= 0 && col < name.length-1)
-          {name = name.substring(col + 1);} // avoid lengthy expanded names // TODO configurable
+          {name = name.substring(col + 1);} // avoid lengthy expanded names
       }
+      if (namePattern === NamePattern.ENTITY_PLUS_ATTRIBUTE)
+        {name += ":"}
       const attributes: string[] = Object.keys(result);
-      INVALID_ATTRIBUTES.forEach(key => {
+      const invalidAttributes = [...INVALID_ATTRIBUTES];
+      if (nameField !== "id")
+        {invalidAttributes.push(nameField);}
+      invalidAttributes.forEach(key => {
         const idx: number = attributes.indexOf(key);
         if (idx >= 0)
           {attributes.splice(idx, 1);}
@@ -84,10 +95,11 @@ export class NgsildDataSource extends DataSourceApi<NgsildQuery, NgsildSourceOpt
       for (const attribute of attributes) {
         if (result[attribute].type === "Relationship")
           {continue;}
+        const attrName: string = namePattern === NamePattern.ENTITY_NAME ? name : name + attribute
         if (result[attribute].values) {
           const data: Measurement[] = result[attribute].values;
           const field = { 
-            name:  name + ":" + attribute, 
+            name:  attrName, 
             values: data.map(point => point[0]), 
             type: FieldType.number 
           };
@@ -107,7 +119,7 @@ export class NgsildDataSource extends DataSourceApi<NgsildQuery, NgsildSourceOpt
           const type: FieldType = isNumber(value) ? FieldType.number : typeof value === "string" ? FieldType.string:
               value === false || value === true ? FieldType.boolean : FieldType.other; 
           const field = { 
-            name:  name + ":" + attribute, 
+            name:  attrName, 
             values: [value], 
             type: FieldType.number 
           };
@@ -155,8 +167,10 @@ export class NgsildDataSource extends DataSourceApi<NgsildQuery, NgsildSourceOpt
           {endpoint = JsUtils.appendQueryParam(endpoint, "aggrPeriodDuration=" + query.aggrPeriodDuration);}
       }
       break;
-    case NgsildQueryType.VERSION:
-      endpoint = "/version";
+    // the /version endpoint is actually orion-specific and can only be used with flavour === "orion"
+    // since we use this for testing the datasource only it is ok to simply use some random other endpoint
+    case NgsildQueryType.VERSION: 
+      endpoint = this.flavour === "orion" ? "/version" : "/types"; 
       break;
     case NgsildQueryType.TYPES:
       endpoint = "/types?details=true";
@@ -206,8 +220,11 @@ export class NgsildDataSource extends DataSourceApi<NgsildQuery, NgsildSourceOpt
     }
     if (query.entityType)
       {endpoint = JsUtils.appendQueryParam(endpoint, "type=" + encodeURIComponent(query.entityType));}
-    if (query.attributes?.length!>0)
-      {endpoint = JsUtils.appendQueryParam(endpoint, "attrs=" + query.attributes?.map(encodeURIComponent).join(","));}
+    if (query.attributes?.length!>0) {
+      if (query.namePattern !== NamePattern.ATTRIBUTE.valueOf() && !!query.entityName && query.entityName !== "id" && query.entityName !== "id_short")
+        {query.attributes?.push(query.entityName);}
+      endpoint = JsUtils.appendQueryParam(endpoint, "attrs=" + query.attributes?.map(encodeURIComponent).join(","));
+    }
     if (query.queryType === NgsildQueryType.TEMPORAL)
       {endpoint = NgsildDataSource.setTimeInterval(endpoint, options?.from, options?.to);}
     if (query.georel) {
@@ -234,7 +251,8 @@ export class NgsildDataSource extends DataSourceApi<NgsildQuery, NgsildSourceOpt
       {endpoint = appendAll(endpoint, options as any, ["limit", "offset", "lastN"]);}
     if (ngsildOptionsParam.length > 0)
       {endpoint = JsUtils.appendQueryParam(endpoint, "options=" + ngsildOptionsParam.join(","))}
-    const baseUrl = query.queryType === NgsildQueryType.VERSION ? this.baseUrl.replace("/ngsi-ld/v1", "") : 
+    const isVersionRequest: boolean = endpoint?.startsWith("/version");
+    const baseUrl = isVersionRequest ? this.baseUrl.replace("/ngsi-ld/v1", "") : 
       query.queryType === NgsildQueryType.TEMPORAL ? this.timeseriesUrl :  this.baseUrl;
     const url: string = JsUtils.concatPaths(baseUrl, endpoint);
     const fetchOptions: BackendSrvRequest = {
@@ -243,7 +261,7 @@ export class NgsildDataSource extends DataSourceApi<NgsildQuery, NgsildSourceOpt
       responseType: "json",
       headers: {Accept: "application/json"}
     };
-    if (this.contextUrl && query.queryType !== NgsildQueryType.VERSION) {
+    if (this.contextUrl && !isVersionRequest) {
       fetchOptions.headers = {
         Link: this.contextLinkHeader,
         Accept: "application/ld+json"
