@@ -195,7 +195,7 @@ export class QueryEditor extends PureComponent<Props, QueryState> {
     const nameIdx = attributes.findIndex(v => v.value === "name");
     if (nameIdx > 0) {
       const nameSelection = attributes.splice(nameIdx, 1);
-      attributes.unshift(nameSelection);
+      attributes.unshift(nameSelection[0]);
     }     
     attributes.unshift({value: "id", label: "id", description: "Entity id", title: "Use the entity id as the entity name."});
     attributes.unshift({value: "id_short", label: "id (short)", description: "Short entity id", title: "Use the short form of the entity id as the entity name."});
