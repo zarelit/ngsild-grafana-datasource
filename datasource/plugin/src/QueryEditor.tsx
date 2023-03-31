@@ -213,10 +213,12 @@ export class QueryEditor extends PureComponent<Props, QueryState> {
     if (entityId && this.state?.attributesByEntityId && entityId in this.state.attributesByEntityId)
         {return this.state.attributesByEntityId[entityId].map(QueryEditor.toOption).sort();}
     if (entityType) {
-      const type: EntityType|undefined = 
-        entityType ? this.state?.types?.find(type => type.typeName === entityType) : undefined;
-      if (type)
-        {return type.attributeNames.map(QueryEditor.toOption).sort();}
+      const types: EntityType[]|undefined =
+        entityType ? this.state?.types?.filter(type => type.typeName === entityType) : undefined;
+      if (types)
+        {
+          return [... new Set(types.flatMap((x) => x.attributeNames))].map(QueryEditor.toOption).sort()
+        }
     }
     return (this.state?.attributes || []).map(QueryEditor.toOption).sort();
   }
